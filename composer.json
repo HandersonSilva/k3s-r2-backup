@@ -1,0 +1,13 @@
+{
+    "name": "local/k3s-r2-backup",
+    "description": "Standalone CLI: compacta token e server/db do K3s e envia para Cloudflare R2 (S3-compatible).",
+    "license": "proprietary",
+    "require": {
+        "php": "^8.2",
+        "aws/aws-sdk-php": "^3.300",
+        "vlucas/phpdotenv": "^5.6"
+    },
+    "config": {
+        "sort-packages": true
+    }
+}
