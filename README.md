@@ -1,6 +1,6 @@
 # Backup K3s para Cloudflare R2
 
-Script PHP autónomo (sem Laravel) que compacta o **token** do servidor K3s e o diretório **`server/db/`** (datastore SQLite / Kine) e envia o arquivo para **Cloudflare R2** via API compatível com S3.
+Scripts PHP autónomos (sem Laravel): **backup** compacta o **token** do servidor K3s e o diretório **`server/db/`** (datastore SQLite / Kine) e envia o arquivo para **Cloudflare R2** via API compatível com S3; **restore** descarrega esse arquivo e extrai para `/` no nó de controlo.
 
 A configuração segue as mesmas variáveis `CLOUDFLARE_R2_*` do disco `r2` do projeto [database-backup](../../src/config/filesystems.php).
 
@@ -34,6 +34,7 @@ Edite `.env` com as credenciais e o endpoint do R2 (iguais às da aplicação La
 | `CLOUDFLARE_R2_URL` | Não | Não usado pelo script; pode ficar vazio |
 | `K3S_SERVER_TOKEN_PATH` | Não | Omissão: `/var/lib/rancher/k3s/server/token` |
 | `K3S_SERVER_DB_DIR` | Não | Omissão: `/var/lib/rancher/k3s/server/db` |
+| `K3S_RESTORE_OBJECT_KEY` | Não | Restore: chave S3 completa do `.tar.gz` (alternativa a `--key=` ou ao mais recente) |
 
 O script lê `.env` (Dotenv) e também variáveis **exportadas no shell** (`getenv`), útil em PHP CLI onde `$_ENV` não reflete o ambiente do sistema.
 
@@ -56,6 +57,25 @@ Em caso de sucesso, o script imprime a **chave do objeto** no bucket e o **SHA-2
 ```
 
 Arquivos **≥ 100 MiB** usam upload **multipart**; abaixo disso usa-se `PutObject`.
+
+## Restore a partir do R2
+
+O script `restore-k3s-from-r2.php` **substitui** no disco o `server/token` e o `server/db/` (e caminhos equivalentes se o backup tiver sido feito com caminhos customizados). Isto é **destrutivo** no nó de controlo; use apenas em recuperação ou migração planeada.
+
+1. Pare o K3s: `sudo systemctl stop k3s`.
+2. Execute o restore como root (escrita em `/var/lib/rancher/k3s/...`):
+
+```bash
+sudo php restore-k3s-from-r2.php --yes
+```
+
+- **`--yes` / `-y`**: confirma o restauro; em execução não-interativa (sem TTY) é **obrigatório**.
+- Sem **`--key=`** e sem `K3S_RESTORE_OBJECT_KEY`: escolhe o objeto `.../k3s-server-backup.tar.gz` com **`LastModified` mais recente** entre todos sob `{prefixo}k3s-control-plane/`.
+- **`--key=<chave>`** ou **`K3S_RESTORE_OBJECT_KEY`**: restaura esse objeto explicitamente.
+
+Se o objeto tiver metadado `sha256` (como no backup), o script verifica o hash após o download. O script **não** inicia o K3s; no fim: `sudo systemctl start k3s`.
+
+Ajuda: `php restore-k3s-from-r2.php --help`.
 
 ## Consistência e âmbito do backup
 
