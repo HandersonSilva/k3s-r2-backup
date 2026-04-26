@@ -30,6 +30,24 @@ $dotenv->safeLoad();
 
 const BACKUP_OBJECT_SUFFIX = '/k3s-server-backup.tar.gz';
 
+function stringStartsWith(string $haystack, string $needle): bool
+{
+    if ($needle === '') {
+        return true;
+    }
+
+    return substr($haystack, 0, strlen($needle)) === $needle;
+}
+
+function stringEndsWith(string $haystack, string $needle): bool
+{
+    if ($needle === '') {
+        return true;
+    }
+
+    return substr($haystack, -strlen($needle)) === $needle;
+}
+
 /**
  * @return array{key?: string, yes: bool}
  */
@@ -42,7 +60,7 @@ function parseCliArgs(array $argv): array
 
             continue;
         }
-        if (str_starts_with($arg, '--key=')) {
+        if (stringStartsWith($arg, '--key=')) {
             $out['key'] = substr($arg, strlen('--key='));
 
             continue;
@@ -171,7 +189,7 @@ function findLatestBackupObjectKey(S3Client $client, string $bucket, string $lis
         if (is_array($contents)) {
             foreach ($contents as $obj) {
                 $key = $obj['Key'] ?? null;
-                if (! is_string($key) || ! str_ends_with($key, BACKUP_OBJECT_SUFFIX)) {
+                if (! is_string($key) || ! stringEndsWith($key, BACKUP_OBJECT_SUFFIX)) {
                     continue;
                 }
                 $lm = $obj['LastModified'] ?? null;
