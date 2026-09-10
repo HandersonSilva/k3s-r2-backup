@@ -4,15 +4,17 @@
 declare(strict_types=1);
 
 /**
- * Restaura o backup do plano de controlo K3s (token + server/db/) a partir de Cloudflare R2.
+ * Restaura o backup do plano de controlo K3s (token + server/db/) a partir de Cloudflare R2,
+ * e quaisquer volumes local-path incluídos no mesmo tar (ex. portainer/argocd).
  *
  * Mesmas variáveis CLOUDFLARE_R2_* que backup-k3s-to-r2.php. Objeto: chave explícita (--key ou
  * K3S_RESTORE_OBJECT_KEY) ou o ficheiro k3s-server-backup.tar.gz mais recente (por LastModified)
  * sob o prefixo .../k3s-control-plane/.
  *
- * Após extrair token+db, remove tls/ e cred/ locais (e kine.sock). Numa instalação fresca ou
- * noutro nó esses ficheiros são mais recentes que o datastore e o K3s aborta com
- * "newer than datastore"; ao removê-los o servidor recria-os a partir do bootstrap no DB.
+ * Após extrair token+db (+ storage se presente no arquivo), remove tls/ e cred/ locais (e kine.sock).
+ * Numa instalação fresca ou noutro nó esses ficheiros são mais recentes que o datastore e o K3s
+ * aborta com "newer than datastore"; ao removê-los o servidor recria-os a partir do bootstrap no DB.
+ * Não remove caminhos sob server storage / local-path.
  *
  * Fluxo recomendado no nó de controlo (root), especialmente noutro host:
  *   sudo systemctl stop k3s
@@ -393,7 +395,7 @@ function confirmDestructiveRestore(bool $yesFlag): void
         return;
     }
     if (function_exists('posix_isatty') && posix_isatty(STDIN)) {
-        fwrite(STDOUT, 'Isto substitui server/token e server/db e remove server/tls e server/cred. Continuar? [s/N] ');
+        fwrite(STDOUT, 'Isto substitui server/token e server/db (e volumes local-path se estiverem no arquivo) e remove server/tls e server/cred. Continuar? [s/N] ');
         $line = fgets(STDIN);
         $answer = strtolower(trim((string) $line));
         if ($answer === 's' || $answer === 'sim' || $answer === 'y' || $answer === 'yes') {
@@ -403,7 +405,7 @@ function confirmDestructiveRestore(bool $yesFlag): void
     }
 
     throw new RuntimeException(
-        'Execução não-interativa: passe --yes (ou -y) após confirmar que o K3s está parado e que pretende sobrescrever token/db e limpar tls/cred.'
+        'Execução não-interativa: passe --yes (ou -y) após confirmar que o K3s está parado e que pretende sobrescrever token/db (e storage do tar) e limpar tls/cred.'
     );
 }
 
@@ -474,6 +476,7 @@ function main(array $argv): void
         assertK3sInactive();
         fwrite(STDOUT, "Destino de extração: / (raiz do sistema).\n");
         fwrite(STDOUT, "Isto repõe token e db em ".DEFAULT_SERVER_DIR." conforme o backup.\n");
+        fwrite(STDOUT, "Se o arquivo incluir volumes local-path (ex. portainer/argocd), também são extraídos sob /var/lib/rancher/k3s/storage/.\n");
         extractArchiveToRoot($archivePath);
         $cleared = clearBootstrapArtifactsNewerThanDatastore();
         if ($cleared !== []) {
