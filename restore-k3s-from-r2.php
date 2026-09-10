@@ -10,10 +10,21 @@ declare(strict_types=1);
  * K3S_RESTORE_OBJECT_KEY) ou o ficheiro k3s-server-backup.tar.gz mais recente (por LastModified)
  * sob o prefixo .../k3s-control-plane/.
  *
- * Fluxo recomendado no nó de controlo (root):
+ * Após extrair token+db, remove tls/ e cred/ locais (e kine.sock). Numa instalação fresca ou
+ * noutro nó esses ficheiros são mais recentes que o datastore e o K3s aborta com
+ * "newer than datastore"; ao removê-los o servidor recria-os a partir do bootstrap no DB.
+ *
+ * Fluxo recomendado no nó de controlo (root), especialmente noutro host:
  *   sudo systemctl stop k3s
+ *   sudo hostnamectl set-hostname <hostname-do-nó-original>   # evita nó fantasma
  *   sudo php restore-k3s-from-r2.php --yes
  *   sudo systemctl start k3s
+ *
+ * O hostname original está no path do objeto R2 (.../k3s-control-plane/{hostname}/...).
+ * Se o hostname actual for diferente, o script avisa (não altera o hostname sozinho).
+ *
+ * Se o journal mostrar containerd-shim leftover após falhas anteriores:
+ *   sudo pkill -9 containerd-shim; sudo pkill -9 k3s
  *
  * O script não inicia o K3s automaticamente. Sem --yes: em terminal interativo pede confirmação;
  * em modo não-interativo é obrigatório --yes.
@@ -29,6 +40,7 @@ $dotenv = Dotenv\Dotenv::createImmutable(__DIR__);
 $dotenv->safeLoad();
 
 const BACKUP_OBJECT_SUFFIX = '/k3s-server-backup.tar.gz';
+const DEFAULT_SERVER_DIR = '/var/lib/rancher/k3s/server';
 
 function stringStartsWith(string $haystack, string $needle): bool
 {
@@ -74,6 +86,9 @@ Uso: php restore-k3s-from-r2.php [opções]
   -h, --help         Esta ajuda.
 
 Sem --key: usa K3S_RESTORE_OBJECT_KEY ou o backup mais recente (LastModified) em .../k3s-control-plane/.
+Após extrair token+db, remove server/tls, server/cred e kine.sock para o K3s recriar a partir do datastore.
+Noutro nó: alinhe o hostname ao segmento do path (.../k3s-control-plane/{hostname}/...) antes do start:
+  sudo hostnamectl set-hostname <hostname>
 TXT;
             fwrite(STDOUT, $usage);
 
@@ -264,13 +279,121 @@ function extractArchiveToRoot(string $archivePath): void
     }
 }
 
+/**
+ * Remove árvore de ficheiros/directórios (equivalente a rm -rf).
+ */
+function removePathRecursive(string $path): void
+{
+    if (is_link($path) || is_file($path)) {
+        if (! unlink($path)) {
+            throw new RuntimeException('Não foi possível remover: '.$path);
+        }
+
+        return;
+    }
+    if (! is_dir($path)) {
+        return;
+    }
+    $items = scandir($path);
+    if ($items === false) {
+        throw new RuntimeException('Não foi possível listar: '.$path);
+    }
+    foreach ($items as $item) {
+        if ($item === '.' || $item === '..') {
+            continue;
+        }
+        removePathRecursive($path.DIRECTORY_SEPARATOR.$item);
+    }
+    if (! rmdir($path)) {
+        throw new RuntimeException('Não foi possível remover directório: '.$path);
+    }
+}
+
+/**
+ * Extrai o segmento de hostname da chave R2
+ * (.../k3s-control-plane/{hostname}/{timestamp}/k3s-server-backup.tar.gz).
+ */
+function backupHostFromObjectKey(string $objectKey): ?string
+{
+    $marker = 'k3s-control-plane/';
+    $pos = strpos($objectKey, $marker);
+    if ($pos === false) {
+        return null;
+    }
+    $rest = substr($objectKey, $pos + strlen($marker));
+    $parts = explode('/', $rest);
+    if (count($parts) < 3 || $parts[0] === '') {
+        return null;
+    }
+
+    return $parts[0];
+}
+
+/**
+ * Hostname actual sanitizado como no backup (safeHostSegment).
+ */
+function currentHostSegment(): string
+{
+    $host = (string) gethostname();
+    $host = preg_replace('/[^a-zA-Z0-9._-]+/', '-', $host) ?? 'unknown-host';
+
+    return $host === '' ? 'unknown-host' : $host;
+}
+
+/**
+ * Avisa se o hostname local não coincide com o do path do backup (evita nó fantasma).
+ * Não altera o hostname; apenas recomenda hostnamectl.
+ */
+function warnIfHostnameMismatch(string $objectKey): void
+{
+    $backupHost = backupHostFromObjectKey($objectKey);
+    if ($backupHost === null) {
+        return;
+    }
+    $current = currentHostSegment();
+    if (strcasecmp($current, $backupHost) === 0) {
+        fwrite(STDOUT, 'Hostname alinhado com o backup: '.$current."\n");
+
+        return;
+    }
+    fwrite(STDERR, 'AVISO: hostname actual ('.$current.') ≠ nó do backup ('.$backupHost.").\n");
+    fwrite(STDERR, "Sem alinhar, o K3s pode registar um segundo control-plane e deixar pods presos no nó antigo.\n");
+    fwrite(STDERR, 'Antes de iniciar o K3s: sudo hostnamectl set-hostname '.$backupHost."\n");
+    fwrite(STDERR, "(Se o K3s já arrancou com o nome errado: kubectl delete node <nó-fantasma> e force-delete pods Terminating.)\n");
+}
+
+/**
+ * Após restaurar token+db, remove bootstrap em disco gerado por uma install fresca.
+ * O K3s recria tls/ e cred/ a partir do datastore no próximo start.
+ *
+ * @return list<string> caminhos removidos (para log)
+ */
+function clearBootstrapArtifactsNewerThanDatastore(string $serverDir = DEFAULT_SERVER_DIR): array
+{
+    $removed = [];
+    foreach (['tls', 'cred'] as $name) {
+        $path = $serverDir.'/'.$name;
+        if (file_exists($path) || is_link($path)) {
+            removePathRecursive($path);
+            $removed[] = $path;
+        }
+    }
+    $sock = $serverDir.'/kine.sock';
+    if (file_exists($sock) || is_link($sock)) {
+        removePathRecursive($sock);
+        $removed[] = $sock;
+    }
+
+    return $removed;
+}
+
 function confirmDestructiveRestore(bool $yesFlag): void
 {
     if ($yesFlag) {
         return;
     }
     if (function_exists('posix_isatty') && posix_isatty(STDIN)) {
-        fwrite(STDOUT, 'Isto substitui server/token e server/db no disco. Continuar? [s/N] ');
+        fwrite(STDOUT, 'Isto substitui server/token e server/db e remove server/tls e server/cred. Continuar? [s/N] ');
         $line = fgets(STDIN);
         $answer = strtolower(trim((string) $line));
         if ($answer === 's' || $answer === 'sim' || $answer === 'y' || $answer === 'yes') {
@@ -280,7 +403,7 @@ function confirmDestructiveRestore(bool $yesFlag): void
     }
 
     throw new RuntimeException(
-        'Execução não-interativa: passe --yes (ou -y) após confirmar que o K3s está parado e que pretende sobrescrever os ficheiros.'
+        'Execução não-interativa: passe --yes (ou -y) após confirmar que o K3s está parado e que pretende sobrescrever token/db e limpar tls/cred.'
     );
 }
 
@@ -316,6 +439,8 @@ function main(array $argv): void
         fwrite(STDOUT, 'Objeto selecionado (mais recente por LastModified): '.$objectKey."\n");
     }
 
+    warnIfHostnameMismatch($objectKey);
+
     $tmp = tempnam(sys_get_temp_dir(), 'k3s-r2-restore-');
     if ($tmp === false) {
         throw new RuntimeException('Não foi possível criar ficheiro temporário.');
@@ -348,8 +473,15 @@ function main(array $argv): void
         confirmDestructiveRestore($cli['yes']);
         assertK3sInactive();
         fwrite(STDOUT, "Destino de extração: / (raiz do sistema).\n");
-        fwrite(STDOUT, "Isto repõe ficheiros em /var/lib/rancher/k3s/server/ conforme conteúdo do backup.\n");
+        fwrite(STDOUT, "Isto repõe token e db em ".DEFAULT_SERVER_DIR." conforme o backup.\n");
         extractArchiveToRoot($archivePath);
+        $cleared = clearBootstrapArtifactsNewerThanDatastore();
+        if ($cleared !== []) {
+            fwrite(STDOUT, "Removidos (recriados pelo K3s a partir do datastore no start):\n");
+            foreach ($cleared as $path) {
+                fwrite(STDOUT, '  '.$path."\n");
+            }
+        }
     } finally {
         if (is_file($archivePath)) {
             unlink($archivePath);
@@ -357,6 +489,8 @@ function main(array $argv): void
     }
 
     fwrite(STDOUT, "Restauro concluído.\n");
+    warnIfHostnameMismatch($objectKey);
+    fwrite(STDOUT, "Se houver avisos de left-over containerd-shim no journal: sudo pkill -9 containerd-shim; sudo pkill -9 k3s\n");
     fwrite(STDOUT, "Inicie o K3s quando estiver pronto: sudo systemctl start k3s\n");
 }
 
