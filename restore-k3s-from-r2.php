@@ -43,6 +43,7 @@ $dotenv->safeLoad();
 
 const BACKUP_OBJECT_SUFFIX = '/k3s-server-backup.tar.gz';
 const DEFAULT_SERVER_DIR = '/var/lib/rancher/k3s/server';
+const NFS_REWRITE_MANIFEST_PATH = '/var/lib/rancher/k3s/server/k3s-r2-nfs-rewrite.json';
 
 function stringStartsWith(string $haystack, string $needle): bool
 {
@@ -395,7 +396,7 @@ function confirmDestructiveRestore(bool $yesFlag): void
         return;
     }
     if (function_exists('posix_isatty') && posix_isatty(STDIN)) {
-        fwrite(STDOUT, 'Isto substitui server/token e server/db (e volumes local-path se estiverem no arquivo) e remove server/tls e server/cred. Continuar? [s/N] ');
+        fwrite(STDOUT, 'Isto substitui server/token e server/db (e volumes local-path / espelho NFS se estiverem no arquivo) e remove server/tls e server/cred. Continuar? [s/N] ');
         $line = fgets(STDIN);
         $answer = strtolower(trim((string) $line));
         if ($answer === 's' || $answer === 'sim' || $answer === 'y' || $answer === 'yes') {
@@ -477,6 +478,7 @@ function main(array $argv): void
         fwrite(STDOUT, "Destino de extração: / (raiz do sistema).\n");
         fwrite(STDOUT, "Isto repõe token e db em ".DEFAULT_SERVER_DIR." conforme o backup.\n");
         fwrite(STDOUT, "Se o arquivo incluir volumes local-path (ex. portainer/argocd), também são extraídos sob /var/lib/rancher/k3s/storage/.\n");
+        fwrite(STDOUT, "Se o arquivo incluir espelho NFS, dados em /var/lib/rancher/k3s/storage/nfs-mirror/ e manifest em ".NFS_REWRITE_MANIFEST_PATH.".\n");
         extractArchiveToRoot($archivePath);
         $cleared = clearBootstrapArtifactsNewerThanDatastore();
         if ($cleared !== []) {
@@ -495,6 +497,19 @@ function main(array $argv): void
     warnIfHostnameMismatch($objectKey);
     fwrite(STDOUT, "Se houver avisos de left-over containerd-shim no journal: sudo pkill -9 containerd-shim; sudo pkill -9 k3s\n");
     fwrite(STDOUT, "Inicie o K3s quando estiver pronto: sudo systemctl start k3s\n");
+    if (is_readable(NFS_REWRITE_MANIFEST_PATH)) {
+        $raw = file_get_contents(NFS_REWRITE_MANIFEST_PATH);
+        $hasVolumes = false;
+        if ($raw !== false) {
+            $decoded = json_decode($raw, true);
+            $vols = is_array($decoded) ? ($decoded['volumes'] ?? []) : [];
+            $hasVolumes = is_array($vols) && $vols !== [];
+        }
+        if ($hasVolumes) {
+            fwrite(STDOUT, "Manifest NFS detectado. Após o K3s estar Up, reescreva PVs NFS → hostPath:\n");
+            fwrite(STDOUT, "  sudo php ".__DIR__."/rewrite-nfs-pvs-to-hostpath.php\n");
+        }
+    }
 }
 
 try {
